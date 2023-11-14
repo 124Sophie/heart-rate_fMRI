@@ -1,0 +1,383 @@
+---
+title: "Diss_Anhang"
+author: "Sophie"
+date: '2023-06-03'
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+# Librarys
+```{r library}
+library("dplyr")
+library("methods")
+library("ggplot2")
+library(imputeTS)
+library(ggpubr)
+library(tidyverse)
+library(readxl)
+
+
+```
+
+```{r PreProcess function}
+
+pre_process <- function(subject_id, drug){
+  # processes data
+  
+  measurement_duration_ms <- 10.5*60*1000
+  block_duration_ms <- 3.5*60*1000
+  sample_rate_ms <- 4
+  
+  file = sprintf("ketamine_data/%s_%s.csv",subject_id,drug)
+  
+  # Convert the input xml file to a data frame.
+  data <- read.csv(file,skip=1)
+  
+  data$data_time <- (data$Position*sample_rate_ms)
+  
+  # add column time difference
+  data <- data %>%
+    mutate(diff = data_time - lag(data_time),
+           Subject= subject_id,
+           Drug=drug)
+  
+  # find the data_time of the fist Response (fMRI)
+  fMRI_start = min(filter(data,Type=="Response")$data_time)
+  
+  
+  # drop all values before fMRI_start and shift data_time
+  data <- data %>% 
+    # drop R128
+    filter(Type == "Pulse Artifact") %>%
+    # drop data before fMRI start
+    filter(data_time >= fMRI_start) %>%
+    # add new relative time
+    mutate(rel_time = data_time - fMRI_start) %>%
+    # drop data after 10.5 min
+    filter(rel_time <= measurement_duration_ms)
+  
+  # add blocks
+  data$block <- ceiling(data$rel_time/block_duration_ms)
+  
+  for(i in 1:nrow(data)) {
+  data$fMRI_TR_time[i] <- ceiling(data$rel_time[i]/3400)
+}
+
+ #filter 
+  
+  data$diff_inter <- data$diff
+  data <- data %>%  
+    filter(diff_inter > median(diff_inter*0.5)) %>%
+    mutate(diff_inter = replace(diff_inter, diff_inter >= median(diff_inter, na.rm=T) *1.5, NA))
+  
+  # interpolate
+  data$diff_inter <- na_interpolation(data$diff_inter, option="linear")
+  data$bpm <- 60000/data$diff
+  data
+}
+
+##export txt dateien 
+```
+
+```{r subjects}
+subjects <- c("51008","54781","54805","54673",
+              "54352","54777","54585","50515",
+              "54583","53773","54824","53952","54613","54283")
+
+ecg_data <- data.frame()
+
+for (subject in subjects){
+  ecg_data <- rbind(ecg_data,pre_process(subject,"ketamine"))
+  ecg_data <- rbind(ecg_data,pre_process(subject,"placebo"))
+}
+
+
+```
+
+```{r visualisation heart rate per TR of fMRI}
+
+fMRI_TR_time <- ecg_data %>%
+   group_by(Subject,Drug,fMRI_TR_time) %>% 
+   filter(fMRI_TR_time> 5) %>%
+   summarise(bpm=mean(bpm))
+
+
+fMRI_TR_time$minutes <- fMRI_TR_time$fMRI_TR_time*3.4/60
+
+  
+ggplot(fMRI_TR_time, aes(x=minutes, y=bpm, colour=Drug)) +
+  labs(tile="Title",x="Messdauer in min.", y="Herzrate in bpm") + 
+  facet_wrap(~Subject)+
+  scale_x_continuous(limits=c(0,11.5)) + 
+  geom_point(size=0.01)
+
+
+```
+
+```{r HR t test and plot}
+
+## t test für unterschiede der herzraten daten 
+hist(ecg_data$diff)
+hist(ecg_data$diff_inter)
+
+ggplot(ecg_data,aes(x=diff)) +
+  geom_bar()+
+  labs(x="Zeitintervall zwischen zwei Herzschlägen in ms", y="Anzahl")
+
+ggplot(ecg_data,aes(x=diff_inter)) +
+  geom_bar() +
+  labs(x="Zeitintervall zwischen zwei Herzschlägen in ms", y="Anzahl")
+
+t.test(diff_inter~Drug, data=ecg_data)
+
+HR_t_test<- ecg_data %>%
+  group_by(Subject,Drug) %>%
+  summarize(HR=mean(bpm))
+
+t.test(data=HR_t_test,HR~Drug, paired=TRUE)
+
+## plot heart rate over time
+
+ecg_data$block_name <- as.character(ecg_data$block)
+
+HR_plot_table<- ecg_data %>% 
+  group_by(Subject, Drug,block_name) %>% 
+  summarise(bpm=mean(bpm))
+
+ggplot(HR_plot_table, aes(x=block_name, y=bpm, colour=Drug)) +
+  labs(tile="Title",x="time interval in min", y="heart rate in bpm")+
+  scale_x_discrete(labels=c("1" = "0 - 3.5", "2" = "3.5 - 7",
+                              "3" = "7 - 10.5"))+
+  geom_boxplot()
+
+
+ggplot(HR_plot_table, aes(x=block_name,y=bpm, colour=Subject))+
+  geom_boxplot()+
+  facet_grid(~Drug)
+
+
+ggplot(ecg_data, aes(x=rel_time,y=bpm, colour=Drug))+
+  geom_point(size=0.01)+
+  facet_wrap(~Subject)
+
+ggplot(ecg_data, aes(x=block,y=bpm, colour=Drug))+
+  geom_boxplot()+
+  facet_wrap(~Subject)
+
+ggplot(HR_plot_table, aes(x=block_name, y=bpm, colour=Subject)) +
+  geom_line() +
+  geom_point() +
+  facet_grid(~Drug)
+```
+
+```{r example histogram}
+##visualize data 
+# example
+#data_54674 = pre_process("54674","ketamine")
+
+#hist(data_54674$bpm,breaks=20)
+#plot(data_54674$rel_time/1000,data_54674$diff)
+#plot(data_54674$rel_time/1000,data_54674$diff_inter)
+
+## plot data without interpolation
+
+'for (subject in subjects){
+  data_subject = pre_process(subject,"placebo")
+  hist(data_subject$bpm,breaks=20)
+  
+}
+'
+
+#data_51008 = pre_process("51008","placebo")
+#plot(data_51008$rel_time/1000,data_51008$diff)
+#plot(data_51008$rel_time/1000,data_51008$diff_inter)
+```
+
+
+
+```{r hrv}
+# berechnung RMSDD
+ecg_data <- ecg_data %>%
+    mutate(diff_diff_squared = (diff_inter - lag(diff_inter,default=0))**2)
+
+  hrv <- ecg_data %>% 
+  group_by(Subject,Drug) %>% 
+  summarise(RMSSD=sqrt(mean(diff_diff_squared))) 
+  
+  
+
+```
+
+```{r plot BOLD}
+BOLD_HR <- read_excel("BOLD_diff.xlsx")
+
+hist(BOLD_HR$mPFC_K)
+hist(BOLD_HR$mPFC_P)
+hist(BOLD_HR$bilPC_K)
+hist(BOLD_HR$bilPC_P)
+
+##boxplot BOLD in mPFC and PC under ketamine and placebo 
+boxplot(subset(BOLD_HR, select=c(mPFC_P,mPFC_K,bilPC_P,bilPC_K))) 
+
+## pearson´s R HR and BOLD
+
+ggplot(BOLD_HR,aes(HR_diff,mPFC_diff)) + geom_point() + coord_cartesian() + ylim(-0.5,0.4) + xlim(-30,20)  + geom_vline(xintercept = 0)+ geom_hline(yintercept = 0) +stat_smooth(method = lm) + stat_cor(method = "pearson")
+
+ggplot(BOLD_HR,aes(HR_diff,bilPC_diff)) + geom_point() + coord_cartesian() + ylim(-0.5,0.4) + xlim(-30,20)  + geom_vline(xintercept = 0)+ geom_hline(yintercept = 0) +stat_smooth(method = lm) + stat_cor(method = "pearson")
+
+
+##hier noch statistik zum BOLD Signal einfügen
+#wie unterscheiden sich placebo und ketamin? 
+
+
+
+
+## correlation HR BOLD without Drug difference 
+diagram <- read_excel("HR_vs_Bold_mPFC_bilateral_PC.xlsx")
+# 1 is placebo, 2 is ketamine 
+
+diagram <- diagram %>%
+  mutate(Drug = case_when(
+    drug==1 ~ "Placebo",
+    drug==2 ~ "Ketamine"
+  ))
+
+shapes = c("Ketamine"= 2, "Placebo"= 17)
+
+ggplot(diagram,aes(x=hr)) + 
+  geom_point(aes(y=mPFC, shape=Drug,colour="mPFC")) +
+  geom_point(aes(y=bilPC, shape=Drug,colour="bilPC")) +
+  geom_smooth(method = "lm", aes(x=hr, y=mPFC, colour="mPFC"))+
+  geom_smooth(method='lm', aes(x=hr, y=bilPC, colour="bilPC"))+
+  stat_cor(method = "pearson", label.y.npc = .9 ,aes(y=mPFC, color="mPFC",label = paste(..rr.label.., ..p.label..,sep = "~`,`~"))) +
+  stat_cor(method = "pearson",  aes(y=bilPC, color="bilPC",label = paste(..rr.label.., ..p.label..,sep = "~`,`~"))) +
+  labs(tile="Title",x="heart rate in bpm", y="dmn functional connectivity", colour = "brain area", shape="drug")+
+  scale_color_discrete()+
+  scale_shape_manual(values=shapes)
+
+
+ggplot(BOLD_HR, aes(x=HR_K, y=mPFC_K))+
+   geom_point()+
+ stat_smooth(method = lm) + 
+  stat_cor(method = "pearson")+
+   labs(x= "Herzrate in bpm unter Ketamin", y="funktionelle Konnektivität im mPFC unter Ketamin")
+
+
+ggplot(BOLD_HR, aes(x=HR_Pl, y=mPFC_P))+
+   geom_point()+
+  stat_smooth(method = lm) + 
+  stat_cor(method = "pearson")+
+   labs(x= "Herzrate in bpm unter Placebo", y="funktionelle Konnektivität im mPFC unter Placebo")
+
+
+
+ggplot(BOLD_HR, aes(x=HR_K, y=bilPC_K))+
+   geom_point()+
+  stat_smooth(method = lm) + 
+  stat_cor(method = "pearson")+
+   labs(x= "Herzrate in bpm unter Ketamin", y="funktionelle Konnektivität im parietalen Cortex unter Ketamin")
+
+
+
+ggplot(BOLD_HR, aes(x=HR_Pl, y=bilPC_P))+
+  geom_point()+
+  stat_smooth(method = lm) + 
+  stat_cor(method = "pearson")+
+  labs(x= "Herzrate in bpm unter Placebo", y="funktionelle Konnektivität im parietalen Cortex unter Placebo")
+
+
+```
+
+```{r SDNN}
+## berechnung SDNN 
+SDNN <- ecg_data %>%
+  group_by(Subject, Drug) %>%
+  summarize(SDNN=sd(diff_inter))
+
+SDNN_P <- SDNN %>%
+  filter(Drug=="placebo") %>%
+  summarize(Subject,SDNN_P=SDNN)
+
+SDNN_K <- SDNN %>%
+  filter(Drug=="ketamine") %>%
+  summarize(Subject,SDNN_K=SDNN)
+
+BOLD_HR <- cbind(BOLD_HR, SDNN_K=SDNN_K$SDNN_K, SDNN_P=SDNN_P$SDNN_P)
+
+## Korrelationen SDNN und BOLD 
+
+ggplot(BOLD_HR, aes(x=SDNN_K, y=mPFC_K))+
+   geom_point()+
+ stat_smooth(method = lm) + 
+  stat_cor(method = "pearson")+
+   labs(x= "SDNN unter Ketamin", y="funktionelle Konnektivität im mPFC unter Ketamin")
+
+ggplot(BOLD_HR, aes(x=SDNN_P, y=mPFC_P))+
+   geom_point()+
+ stat_smooth(method = lm) + 
+  stat_cor(method = "pearson")+
+   labs(x= "SDNN unter Placebo", y="funktionelle Konnektivität im mPFC unter Placebo")
+
+ggplot(BOLD_HR, aes(x=SDNN_K, y=bilPC_K))+
+   geom_point()+
+ stat_smooth(method = lm) + 
+  stat_cor(method = "pearson")+
+   labs(x= "SDNN unter Ketamin", y="funktionelle Konnektivität im bilPC unter Ketamin")
+
+
+ggplot(BOLD_HR, aes(x=SDNN_P, y=bilPC_P))+
+   geom_point()+
+ stat_smooth(method = lm) + 
+  stat_cor(method = "pearson")+
+   labs(x= "SDNN unter Placebo", y="funktionelle Konnektivität im bilPC unter Placebo")
+
+## nichts signifikant 
+
+ggplot(BOLD_HR, aes(x=SDNN_K, y=HR_K))+
+   geom_point()+
+ stat_smooth(method = lm) + 
+  stat_cor(method = "pearson")
+            
+ggplot(BOLD_HR, aes(x=SDNN_P, y=HR_Pl))+
+   geom_point()+
+ stat_smooth(method = lm) + 
+  stat_cor(method = "pearson")
+
+SDNN_Diff <- SDNN_P$SDNN_P- SDNN_K$SDNN_K
+SDNN_Diff <- data.frame(SDNN_Diff)
+BOLD_HR <- cbind(BOLD_HR, SDNN_Diff)
+
+ggplot(BOLD_HR, aes(x=SDNN_Diff, y=mPFC_diff))+
+   geom_point()+
+ stat_smooth(method = lm) + 
+  stat_cor(method = "pearson")
+
+ggplot(BOLD_HR, aes(x=SDNN_Diff, y=bilPC_diff))+
+   geom_point()+
+ stat_smooth(method = lm) + 
+  stat_cor(method = "pearson")
+
+```
+
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+
+
+
+
+## Including Plots
+
+You can also embed plots, for example:
+
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
